@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Nop.Core;
 using Nop.Core.Domain.Catalog;
@@ -24,7 +25,6 @@ using Nop.Web.Framework.Controllers;
 using Nop.Web.Framework.Mvc;
 using Nop.Web.Framework.Mvc.Filters;
 using Nop.Web.Framework.Security;
-using Nop.Web.Framework.Security.Captcha;
 using Nop.Web.Models.Catalog;
 
 namespace Nop.Web.Controllers
@@ -42,9 +42,11 @@ namespace Nop.Web.Controllers
         private readonly ILocalizationService _localizationService;
         private readonly IOrderService _orderService;
         private readonly IPermissionService _permissionService;
+        private readonly IProductAttributeParser _productAttributeParser;
         private readonly IProductModelFactory _productModelFactory;
         private readonly IProductService _productService;
         private readonly IRecentlyViewedProductsService _recentlyViewedProductsService;
+        private readonly IShoppingCartModelFactory _shoppingCartModelFactory;
         private readonly IShoppingCartService _shoppingCartService;
         private readonly IStoreContext _storeContext;
         private readonly IStoreMappingService _storeMappingService;
@@ -68,9 +70,11 @@ namespace Nop.Web.Controllers
             ILocalizationService localizationService,
             IOrderService orderService,
             IPermissionService permissionService,
+            IProductAttributeParser productAttributeParser,
             IProductModelFactory productModelFactory,
             IProductService productService,
             IRecentlyViewedProductsService recentlyViewedProductsService,
+            IShoppingCartModelFactory shoppingCartModelFactory,
             IShoppingCartService shoppingCartService,
             IStoreContext storeContext,
             IStoreMappingService storeMappingService,
@@ -90,9 +94,11 @@ namespace Nop.Web.Controllers
             _localizationService = localizationService;
             _orderService = orderService;
             _permissionService = permissionService;
+            _productAttributeParser = productAttributeParser;
             _productModelFactory = productModelFactory;
             _productService = productService;
             _recentlyViewedProductsService = recentlyViewedProductsService;
+            _shoppingCartModelFactory = shoppingCartModelFactory;
             _shoppingCartService = shoppingCartService;
             _storeContext = storeContext;
             _storeMappingService = storeMappingService;
@@ -183,6 +189,60 @@ namespace Nop.Web.Controllers
             var productTemplateViewPath = _productModelFactory.PrepareProductTemplateViewPath(product);
 
             return View(productTemplateViewPath, model);
+        }
+
+        [PublicAntiForgery]
+        [HttpPost]
+        public virtual IActionResult EstimateShipping([FromQuery] ProductEstimateShippingModel model, IFormCollection form)
+        {
+            if (model == null)
+                return BadRequest();
+            
+            var product = _productService.GetProductById(model.ProductId);
+            if (product == null || product.Deleted || !product.Published)
+                return NotFound();
+
+            var errors = new List<string>();
+
+            if (string.IsNullOrEmpty(model.ZipPostalCode))
+                errors.Add(_localizationService.GetResource("Shipping.EstimateShipping.ZipPostalCode.Required"));
+
+            if (model.CountryId == null || model.CountryId == 0)
+                errors.Add(_localizationService.GetResource("Shipping.EstimateShipping.Country.Required"));
+
+            if (errors.Count > 0)
+                return BadRequest(new { Errors = errors });
+
+            var wrappedProduct = new ShoppingCartItem()
+            {
+                StoreId = _storeContext.CurrentStore.Id,
+                ShoppingCartTypeId = (int)ShoppingCartType.ShoppingCart,
+                CustomerId = _workContext.CurrentCustomer.Id,
+                Customer = _workContext.CurrentCustomer,
+                ProductId = product.Id,
+                Product = product,
+                CreatedOnUtc = DateTime.UtcNow
+            };
+
+            var addToCartWarnings = new List<string>();
+
+            //customer entered price
+            wrappedProduct.CustomerEnteredPrice = _productAttributeParser.ParseCustomerEnteredPrice(product, form);
+
+            //entered quantity
+            wrappedProduct.Quantity = _productAttributeParser.ParseEnteredQuantity(product, form);
+
+            //product and gift card attributes
+            wrappedProduct.AttributesXml = _productAttributeParser.ParseProductAttributes(product, form, addToCartWarnings);
+
+            //rental attributes
+            _productAttributeParser.ParseRentalDates(product, form, out var rentalStartDate, out var rentalEndDate);
+            wrappedProduct.RentalStartDateUtc = rentalStartDate;
+            wrappedProduct.RentalEndDateUtc = rentalEndDate;
+
+            var modelResult = _shoppingCartModelFactory.PrepareEstimateShippingResultModel(new [] { wrappedProduct }, model.CountryId, model.StateProvinceId, model.ZipPostalCode);
+
+            return Json(modelResult);
         }
 
         #endregion
